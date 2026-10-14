@@ -1,6 +1,6 @@
 # 索引页模板
 
-复制下面分隔线之后的内容到 `docs/subsystems/README.md`。表格要列出目录里的每一页，`check_refs.py` 会检查。规则部分改编自 magpie 的 `docs/subsystems/README.md`，可以按项目调整，但保留四个小节。
+复制下面分隔线之后的内容到 `docs/subsystems/README.md`。表格要列出目录里的每一页，`check_refs.py` 会检查。下面的规则可以按项目调整，但保留四个小节。
 
 ---
 

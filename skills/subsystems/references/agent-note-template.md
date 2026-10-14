@@ -1,7 +1,5 @@
 # Agent Note 模板
 
-格式来自 DeepSeek Harness 的 `.agents/notes/`，做了简化。
-
 ## 什么时候写
 
 只在三个条件都成立时写：

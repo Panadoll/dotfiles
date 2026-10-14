@@ -7,8 +7,6 @@ description: "在代码库里建立和维护子系统参考文档（docs/subsyst
 
 大仓库的信息量远超 Agent 一次能装下的上下文。每次改动都从源码重新推一遍“谁拥有什么状态、请求怎么走、哪里不能动”，既慢又容易漏。子系统参考把这些结论压缩成一页，让下一位 Agent 先读结论，再沿链接核对源码。
 
-这套做法来自 magpie（`docs/subsystems/` + `LESSONS.md`）、DeepSeek Harness（文档分层与 Agent Notes）和 pstack（只读体检、源码比对、交付前实测）。
-
 ## 信息放哪里
 
 一个事实只放一处，其他地方链接过去。
