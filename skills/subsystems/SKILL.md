@@ -1,6 +1,6 @@
 ---
 name: subsystems
-description: "在代码库里建立和维护子系统参考文档（docs/subsystems/*.md）：每页说明一项能力的职责、事实源、运行时路径、状态、约束和验证命令，链接到源码符号，与代码同 PR 更新；配套 Agent Notes 记录设计取舍，用脚本检查文档引用是否过期。用于：为仓库建立子系统文档、改代码前了解某个子系统、提交前检查文档是否同步、记录架构决策、定期巡检文档漂移。"
+description: "在代码库里建立和维护子系统参考文档（docs/subsystems/*.md）：每页说明一项能力的职责、事实源、运行时路径、状态、约束和验证命令，链接到源码符号，与代码同 PR 更新；配套 Agent Notes 记录设计取舍，用脚本检查文档引用是否过期；定期复盘已合并的提交，把返工教训写进 LESSONS.md，反复出现的升级为代码规范。用于：为仓库建立子系统文档、改代码前了解某个子系统、提交前检查文档是否同步、记录架构决策、定期巡检文档漂移、复盘最近的提交。"
 ---
 
 # 子系统参考文档
@@ -17,6 +17,8 @@ description: "在代码库里建立和维护子系统参考文档（docs/subsyst
 | 子系统参考 `docs/subsystems/<name>.md` | 职责与边界、事实源、运行时路径、状态、约束与失败行为、验证命令 | 实现细节的复制、历史经过、未来计划 |
 | Agent Notes `docs/agent-notes/` | 为什么选这个方案、放弃了什么、什么条件下可以重新考虑 | 当前行为的描述 |
 | 测试 | 哪些状态绝不允许出现 | — |
+| `LESSONS.md` | 最近的改动错在哪、本可以拦住它的规则、证据提交 | 某个子系统的约束（写进参考页）、决策理由（写进 Agent Note） |
+| 代码规范 `docs/code-standards.md` | 复盘中出现 3 天以上的规则，评审逐条检查 | 只出现过一两次的教训 |
 | `AGENTS.md` / `CLAUDE.md` | 每次会话都要遵守的一两行规则，加链接 | 长篇说明 |
 | Git 历史 | 原始演变过程 | — |
 
@@ -24,7 +26,7 @@ description: "在代码库里建立和维护子系统参考文档（docs/subsyst
 
 ## 检查脚本
 
-`scripts/check_refs.py`（相对本技能目录，只依赖 Python 3 标准库和 git）只读地检查：
+`scripts/check_refs.py`（相对本技能目录，只依赖 Python 3 标准库和 git；下面的 `python` 在 Linux/macOS 上通常是 `python3`）只读地检查：
 
 - 相对链接的目标和锚点是否存在；
 - 绑定到文件的符号是否还在那个文件里，写法是 ``[`Sym`](path)``、`` `Sym` in [..](path) `` 或 ``[..](path) `Sym` ``；
@@ -39,6 +41,8 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 
 失败项返回码为 1。“改过的源文件”只是提示：说明需要人工复核，不代表文档错了。
 
+`scripts/rework.py` 供复盘使用，同样只读：对范围内每个提交用 `git blame` 追溯它改写的行，列出改写了几天内刚写成代码的提交和回滚提交，作为返工候选。
+
 ## 工作流
 
 用户的说法对应到下面某一项即可，不需要斜杠命令。
@@ -48,7 +52,7 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 1. **先盘点已有文档。** 找 `AGENTS.md`、`CLAUDE.md`、`README`、`docs/`、`SPEC.md`、架构图和已有决策记录。已有一份整体规格（例如 `SPEC.md`）时，不要删它，也不要把它整段搬进参考页：参考页写各子系统当前的契约并链接到源码，索引页链接到这份规格。如果规格和代码不一致，把不一致之处列进汇报，让用户决定是修规格还是退役它。
 2. **从代码里切分子系统，不要先问用户。** 按“改动时必须一起理解的范围”来切，不按目录切。下面这些都是切分信号：拥有持久状态，有对外接口（API、CLI、事件、文件格式），有自己的失败或降级策略，跨多个包协作完成一件事。不要给工具函数、单个小模块或纯 UI 组件单独建页。小仓库通常 2 到 6 页就够；切不准时宁可少切，以后再拆。
 3. **写参考页。** 按 [references/reference-template.md](references/reference-template.md) 写。每条断言都要能在源码里找到出处，写不出出处的就不写。没有证据的推测放进“未确认”小节，或者直接问用户。
-4. **写索引和入口。** 按 [references/index-template.md](references/index-template.md) 写 `docs/subsystems/README.md`，并在 `AGENTS.md`（没有就新建）加两三行：改某个子系统前先读它的参考并核对链接的源码，PR 按索引页的规则更新文档。
+4. **写索引和入口。** 按 [references/index-template.md](references/index-template.md) 写 `docs/subsystems/README.md`，并在 `AGENTS.md`（没有就新建）加两三行：改某个子系统前先读它的参考并核对链接的源码，PR 按索引页的规则更新文档。仓库已有 `LESSONS.md` 或代码规范时，入口里也要求先读它们。
 5. **交付前实测。**
    - 跑一遍 `check_refs.py`，修到没有失败项。
    - 逐条执行每页“验证”里的命令。命令要写成从仓库根目录就能运行的形式，不要用绝对路径或本机才有的虚拟环境路径；依赖怎么装写在命令旁边。
@@ -63,6 +67,7 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 1. 读索引，找到对应的子系统参考。没有对应页就照常读代码，并在结束时建议补一页。
 2. 跑 `check_refs.py --doc <name>`。有失败项或“改过的源文件”提示时，先按链接核对源码，以代码为准，再动手。
 3. 读该子系统链接的 Agent Notes。要改动其中某个已记录的取舍时，先告诉用户。
+4. 有 `LESSONS.md` 时读它，找和这次任务相关的教训，动手时照着做。
 
 ### 提交前（audit）
 
@@ -92,6 +97,16 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 ### 定期巡检（maintain）
 
 按 [references/maintenance.md](references/maintenance.md) 执行：先整理索引，再对每页做源码比对（可以用只读子代理并行），然后统一跑验证。结论只有三种：没有问题、提交一份修正、被阻塞（说明原因）。巡检只改文档，不改产品代码。
+
+### 复盘（retro）
+
+巡检查的是文档有没有跟上代码，复盘查的是代码改动本身哪里做错了。按 [references/lessons.md](references/lessons.md) 执行：
+
+1. 从 `LESSONS.md` 第一行的 `reviewed-through` 开始，用 `rework.py` 找返工候选，再补上回滚、重开的 issue、红着测试合并的提交。
+2. 读两边的 diff，判断哪些是本该一次做对的返工，正常的分步开发不算。
+3. 把证据归纳成具体可检查的规则，写进 `LESSONS.md`，每条附提交哈希，按不同的日子计“出现”次数。只关乎一个子系统的规则写进该参考页的约束。
+4. 出现 3 天的教训移进代码规范，评审从此逐条检查。
+5. 推进 `reviewed-through`，只提交 `LESSONS.md`、代码规范和参考页，不改产品代码。
 
 ## 写作要求
 
