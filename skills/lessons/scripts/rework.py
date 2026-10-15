@@ -4,17 +4,18 @@
 对范围内每个非合并提交，取它删除或改写的行，用 git blame 找出这些行是哪个提交写的。
 写这些行的提交离得很近（默认按提交者时间算 72 小时内），且本次提交累计改写达到
 --min-lines（默认 3）行时，记为一条候选，不据此判定返工；阈值跨来源提交累加。
-另外列出提交标题里带 revert / 回滚 的提交；已列为改写候选的只标注回滚，不重复列出。
+另外列出标题带 revert / 回滚 / 撤销 关键词的提交，这是启发式；已列为改写候选的只加 [回滚]。
+非测试、测试行分开计数，非测试含注释和配置；--include-docs 时文档单列，不混入前两类。
 重命名和移动文件跟随旧路径，只计算真正删除或改写的行。支持 SHA-1 和 SHA-256 仓库。
 
 候选只是线索：重构、格式化、同一功能的连续开发也会命中。是否算返工，要读两边的 diff 判断。
 
 用法：
-  python rework.py [--root 仓库根] [--since <commit>] [--last N] [--hours 72] [--min-lines 3]
-                   [--include-docs] [--max-commits 400]
+  python rework.py [--root 仓库根] [--head <commit>] [--since <commit>] [--last N]
+                   [--hours 72] [--min-lines 3] [--include-docs] [--max-commits 400]
 
-  --since 一般填 LESSONS.md 第一行 reviewed-through 的提交；不填时看最近 --last 个提交（默认 50）。
-  reviewed-through 记的是扫描时的 HEAD，下一期从它之后开始，合并进来的分支不会重复扫描。
+  --head 默认 HEAD；--since 表示起点（不含）到 head，不填时从 head 看最近 --last 个提交（默认 50）。
+  --since 一般填 LESSONS.md 第一行 reviewed-through；标记记的是解析后的 head，下一期从它之后开始。
   范围超过 --max-commits、浅克隆或任何 git 调用失败时退出，不输出 reviewed-through。
 退出码：0 正常（有没有候选都是 0）；2 用法错误、范围超限或历史不完整。
 """
@@ -115,8 +116,9 @@ def blame_origins(root: Path, parent: str, path: str, spans: list[tuple[int, int
 def main() -> int:
     ap = argparse.ArgumentParser(description="列出复盘范围内的返工候选（只读）")
     ap.add_argument("--root", default=".")
-    ap.add_argument("--since", help="从这个提交之后开始看（不含它本身）")
-    ap.add_argument("--last", type=int, default=50, help="没有 --since 时看最近多少个提交")
+    ap.add_argument("--head", default="HEAD", help="扫描截至这个提交（默认 HEAD）")
+    ap.add_argument("--since", help="从这个提交之后看到 --head（不含起点）")
+    ap.add_argument("--last", type=int, default=50, help="没有 --since 时从 --head 往回看多少个提交")
     ap.add_argument("--hours", type=float, default=72, help="被返工的代码写成后多久以内算候选")
     ap.add_argument("--min-lines", type=int, default=3, help="改写少于这么多行的不列出")
     ap.add_argument("--include-docs", action="store_true", help="也算 .md 等文档文件的改写")
@@ -131,7 +133,7 @@ def main() -> int:
         print("这是浅克隆，blame 会把边界之前的行算到边界提交上；先 git fetch --unshallow 再重跑", file=sys.stderr)
         return 2
 
-    head = must(root, "rev-parse", "HEAD").strip()
+    head = must(root, "rev-parse", "--verify", "--end-of-options", f"{args.head}^{{commit}}").strip()
     shas = commits_in_range(root, head, args.since, args.last, args.max_commits)
     cache: dict[str, tuple[int, list[str], str]] = {}
 
@@ -158,30 +160,34 @@ def main() -> int:
             origins.sort(key=lambda of: -sum(of[1].values()))
             findings.append((sha, subject, ts, origins))
 
-    def product_lines(f) -> int:
-        return sum(n for _, files in f[3] for p, n in files.items() if not TEST_PATH_RE.search(p))
+    def non_test_lines(f) -> int:
+        return sum(n for _, files in f[3] for p, n in files.items()
+                   if not DOC_PATH_RE.search(p) and not TEST_PATH_RE.search(p))
 
-    findings.sort(key=lambda f: (not FIX_RE.search(f[1]), product_lines(f) == 0, -product_lines(f)))
+    findings.sort(key=lambda f: (not FIX_RE.search(f[1]), -non_test_lines(f)))
     finding_shas = {finding[0] for finding in findings}
     reverts = [(sha, subject) for sha, subject in reverts if sha not in finding_shas]
     span = f"（{shas[0][:9]}..{shas[-1][:9]}）" if shas else ""
-    print(f"看了 {len(shas)} 个非合并提交{span}，截至 HEAD {head[:9]}")
+    print(f"看了 {len(shas)} 个非合并提交{span}，截至扫描头 {head[:9]}")
     if reverts:
         print("\n回滚：")
         for sha, subject in reverts:
             print(f"  {sha[:9]} {subject}")
-    scope = "含文档" if args.include_docs else "不含文档"
+    scope = "文档单列" if args.include_docs else "不含文档"
     print(f"\n返工候选（改写了 {args.hours:g} 小时内写成的至少 {args.min_lines} 行，{scope}），"
-          f"共 {len(findings)} 个提交。修复类在前；仅命中近期测试行的排在同类最后，仍须读完整 diff 判断：")
+          f"共 {len(findings)} 个提交。修复类在前，同类按非测试行数排序；仍须读完整 diff 判断：")
     for sha, subject, ts, origins in findings:
         revert_label = " [回滚]" if REVERT_RE.search(subject) else ""
         print(f"  {sha[:9]} {subject}{revert_label}")
         for origin, files in origins:
-            test = sum(n for p, n in files.items() if TEST_PATH_RE.search(p))
-            prod = sum(files.values()) - test
+            docs = sum(n for p, n in files.items() if DOC_PATH_RE.search(p))
+            test = sum(n for p, n in files.items() if not DOC_PATH_RE.search(p) and TEST_PATH_RE.search(p))
+            non_test = sum(files.values()) - test - docs
+            docs_label = f"、文档 {docs} 行" if args.include_docs else ""
             where = ", ".join(f"{p}({n})" for p, n in sorted(files.items(), key=lambda kv: -kv[1])[:3])
             age = (ts - info(origin)[0]) / 3600
-            print(f"    改写 {origin[:9]} 的产品代码 {prod} 行、测试 {test} 行，相隔 {age:.1f} 小时：{info(origin)[2]}")
+            print(f"    改写 {origin[:9]} 的非测试 {non_test} 行、测试 {test} 行{docs_label}，"
+                  f"相隔 {age:.1f} 小时：{info(origin)[2]}")
             print(f"      {where}")
     when = must(root, "show", "-s", "--format=%ci", head).strip()
     stamp = when[:16] + " " + when[-5:]

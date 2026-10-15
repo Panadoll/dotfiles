@@ -67,9 +67,9 @@ class ReworkTests(unittest.TestCase):
 
     def rewritten_counts(self, result):
         return {
-            sha: (int(product), int(tests))
-            for sha, product, tests in re.findall(
-                r"^    改写 ([0-9a-f]{9}) 的产品代码 (\d+) 行、测试 (\d+) 行",
+            sha: (int(non_test), int(tests))
+            for sha, non_test, tests in re.findall(
+                r"^    改写 ([0-9a-f]{9}) 的非测试 (\d+) 行、测试 (\d+) 行",
                 result.stdout, re.MULTILINE,
             )
         }
@@ -85,7 +85,7 @@ class ReworkTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"{fix[:9]} fix: settings", result.stdout)
-        self.assertIn(f"改写 {origin[:9]} 的产品代码 3 行、测试 0 行", result.stdout)
+        self.assertEqual(self.rewritten_counts(result), {origin[:9]: (3, 0)})
         self.assertIn("状态 设置.py(3)", result.stdout)
 
     def test_refuses_truncated_review_range(self):
@@ -115,7 +115,7 @@ class ReworkTests(unittest.TestCase):
         result = self.run_script("rework.py", "--last", "2")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"改写 {origin[:9]} 的产品代码 4 行", result.stdout)
+        self.assertEqual(self.rewritten_counts(result), {origin[:9]: (4, 0)})
 
     def test_counts_every_hunk_of_a_large_rewrite(self):
         source = self.root / "values.py"
@@ -127,7 +127,7 @@ class ReworkTests(unittest.TestCase):
         result = self.run_script("rework.py", "--last", "2")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"改写 {origin[:9]} 的产品代码 100 行", result.stdout)
+        self.assertEqual(self.rewritten_counts(result), {origin[:9]: (100, 0)})
 
     def test_moved_file_is_not_rework(self):
         (self.root / "old").mkdir()
@@ -230,7 +230,7 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(self.rewritten_counts(result), {changed[:9]: (3, 0)})
 
     def test_fix_sorting_prioritizes_product_before_test_only_changes(self):
-        """修复先于更大的功能改写，同类中产品代码先于仅测试改写。"""
+        """修复先于更大的功能改写，同类中非测试行先于仅测试改写。"""
         self.write_source("feature.py", count=12)
         self.write_source("tests/test_app.py", count=6)
         self.write_source("app.py")
@@ -249,8 +249,11 @@ class ReworkTests(unittest.TestCase):
         )
 
     def test_counts_product_and_test_files_separately(self):
-        """同一来源的产品、测试目录及文件名约定分别计数。"""
-        paths = (("src/app.py", 2), ("tests/test_app.py", 3), ("ui/button.spec.ts", 4))
+        """非测试、测试和文档分别计数，测试路径下的文档也不重复计入。"""
+        paths = (
+            ("src/app.py", 2), ("tests/test_app.py", 3), ("ui/button.spec.ts", 4),
+            ("guide.MD", 5), ("fixtures/README.md", 6),
+        )
         for name, count in paths:
             self.write_source(name, count=count)
         origin = self.commit("feat: product and tests")
@@ -262,6 +265,10 @@ class ReworkTests(unittest.TestCase):
 
         self.assertEqual(self.candidate_shas(result), [changed[:9]])
         self.assertEqual(self.rewritten_counts(result), {origin[:9]: (2, 7)})
+        included = self.run_script("rework.py", "--last", "1", "--include-docs")
+        self.assertEqual(self.candidate_shas(included), [changed[:9]])
+        self.assertEqual(self.rewritten_counts(included), {origin[:9]: (2, 7)})
+        self.assertEqual(re.findall(r"、文档 (\d+) 行", included.stdout), ["11"])
 
     def test_docs_are_opt_in(self):
         """默认排除文档；显式纳入时能追溯大写扩展名的文档。"""
@@ -275,7 +282,8 @@ class ReworkTests(unittest.TestCase):
 
         self.assertEqual(self.candidate_shas(excluded), [])
         self.assertEqual(self.candidate_shas(included), [changed[:9]])
-        self.assertEqual(self.rewritten_counts(included), {origin[:9]: (3, 0)})
+        self.assertEqual(self.rewritten_counts(included), {origin[:9]: (0, 0)})
+        self.assertEqual(re.findall(r"、文档 (\d+) 行", included.stdout), ["3"])
 
     def test_since_is_exclusive_and_overrides_last(self):
         """最近 N 个提交包含 HEAD；since 排除起点并覆盖 last 的截断。"""
@@ -290,6 +298,63 @@ class ReworkTests(unittest.TestCase):
 
         self.assertEqual(self.candidate_shas(last), [sha[:9] for sha in commits[2:]])
         self.assertEqual(self.candidate_shas(since), [sha[:9] for sha in commits[1:]])
+
+    def test_head_freezes_last_window_after_review_commit(self):
+        """复盘提交落地后，指定原扫描头仍保留原候选窗口和标记。"""
+        commits = []
+        for i in range(3):
+            self.set_dates(i)
+            self.write_source("app.py", value=i)
+            commits.append(self.commit(f"fix: app {i}"))
+        first = self.run_script("rework.py", "--last", "2")
+        self.set_dates(24)
+        self.write_source("LESSONS.md")
+        reviewed = self.commit("docs: record lessons")
+
+        repeated = self.run_script("rework.py", "--head", commits[-1][:9], "--last", "2")
+
+        self.assertEqual(self.candidate_shas(first), [sha[:9] for sha in commits[1:]])
+        self.assertEqual(self.candidate_shas(repeated), self.candidate_shas(first))
+        self.assertEqual(self.rewritten_counts(repeated), self.rewritten_counts(first))
+        self.assertIn(
+            f"reviewed-through: {commits[-1][:9]} (2026-10-01 10:00 +0000)", repeated.stdout,
+        )
+        self.assertNotIn(reviewed[:9], repeated.stdout)
+
+    def test_head_bounds_since_and_resolves_commit_tag(self):
+        """since 排除起点、止于解析后的 head，仍覆盖 last 且遵守范围上限。"""
+        commits = []
+        for i in range(4):
+            self.set_dates(i)
+            self.write_source("app.py", value=i)
+            commits.append(self.commit(f"fix: app {i}"))
+        self.git("tag", "-a", "review-head", "-m", "Frozen review head", commits[2])
+
+        result = self.run_script(
+            "rework.py", "--head", "review-head", "--since", commits[0],
+            "--last", "1", "--max-commits", "2",
+        )
+
+        self.assertEqual(self.candidate_shas(result), [sha[:9] for sha in commits[1:3]])
+        self.assertIn(f"reviewed-through: {commits[2][:9]}", result.stdout)
+        self.assertNotIn(commits[3][:9], result.stdout)
+        truncated = self.run_script(
+            "rework.py", "--head", "review-head", "--since", commits[0], "--max-commits", "1",
+        )
+        self.assertEqual(truncated.returncode, 2, truncated.stdout + truncated.stderr)
+        self.assertNotIn("reviewed-through:", truncated.stdout)
+
+    def test_invalid_head_aborts_without_advancing_marker(self):
+        """不存在的 head 或非提交对象必须拒绝，不能退回当前 HEAD。"""
+        self.write_source("app.py")
+        self.commit("feat: app")
+        for head in ("missing-review-head", "HEAD:app.py", "HEAD^{tree}"):
+            with self.subTest(head=head):
+                result = self.run_script("rework.py", "--head", head)
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("rev-parse", result.stderr)
+                self.assertNotIn("reviewed-through:", result.stdout)
 
     def test_merge_commit_is_excluded_but_branch_rewrite_is_scanned(self):
         """合并本身不列为改写，合并进来的分支提交仍受范围检查。"""
