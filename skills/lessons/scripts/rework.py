@@ -32,7 +32,10 @@ from pathlib import Path
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 GITLINK_RE = re.compile(r"^(index \S+ |deleted file mode |old mode )160000\b")
 REVERT_RE = re.compile(r"\brevert|回滚|撤销", re.I)
-SKIP_PATH_RE = re.compile(r"(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum|uv\.lock|Cargo\.lock)$|\.(min\.js|snap)$")
+SKIP_PATH_RE = re.compile(
+    r"(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum|uv\.lock|Cargo\.lock|"
+    r"bun\.lockb?|poetry\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock)$|\.(min\.js|snap)$"
+)
 DOC_PATH_RE = re.compile(r"\.(md|mdx|rst|txt)$", re.I)
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__|spec|testdata|fixtures)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/]+$", re.I)
 FIX_RE = re.compile(r"^(fix|hotfix|bugfix)\b|^修复|\bfix(es|ed)?\b", re.I)
@@ -167,7 +170,7 @@ def main() -> int:
     findings.sort(key=lambda f: (not FIX_RE.search(f[1]), -non_test_lines(f)))
     finding_shas = {finding[0] for finding in findings}
     reverts = [(sha, subject) for sha, subject in reverts if sha not in finding_shas]
-    span = f"（{shas[0][:9]}..{shas[-1][:9]}）" if shas else ""
+    span = f"（首个 {shas[0][:9]}，末个 {shas[-1][:9]}）" if shas else ""
     print(f"看了 {len(shas)} 个非合并提交{span}，截至扫描头 {head[:9]}")
     if reverts:
         print("\n回滚：")
@@ -175,7 +178,7 @@ def main() -> int:
             print(f"  {sha[:9]} {subject}")
     scope = "文档单列" if args.include_docs else "不含文档"
     print(f"\n返工候选（改写了 {args.hours:g} 小时内写成的至少 {args.min_lines} 行，{scope}），"
-          f"共 {len(findings)} 个提交。修复类在前，同类按非测试行数排序；仍须读完整 diff 判断：")
+          f"共 {len(findings)} 个提交。修复类仅按标题识别并优先，同类按非测试行数排序；仍须读 diff 核实证据链：")
     for sha, subject, ts, origins in findings:
         revert_label = " [回滚]" if REVERT_RE.search(subject) else ""
         print(f"  {sha[:9]} {subject}{revert_label}")

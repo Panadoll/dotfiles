@@ -285,6 +285,25 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(self.rewritten_counts(included), {origin[:9]: (0, 0)})
         self.assertEqual(re.findall(r"、文档 (\d+) 行", included.stdout), ["3"])
 
+    def test_lock_files_do_not_count_toward_candidate_threshold(self):
+        """根目录和嵌套锁文件都不计数，也不能把两行代码推过三行阈值。"""
+        for name in ("bun.lock", "bun.lockb", "poetry.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock"):
+            with self.subTest(lock=name):
+                for path in (name, f"nested/{name}"):
+                    self.write_source(path)
+                self.write_source("app.py", count=2)
+                origin = self.commit(f"feat: fixtures for {name}")
+                for path in (name, f"nested/{name}"):
+                    self.write_source(path, value=1)
+                self.write_source("app.py", count=2, value=1)
+                changed = self.commit(f"fix: update {name} and app")
+
+                below_threshold = self.run_script("rework.py", "--last", "1")
+                self.assertEqual(self.candidate_shas(below_threshold), [])
+                included = self.run_script("rework.py", "--last", "1", "--min-lines", "2", "--include-docs")
+                self.assertEqual(self.candidate_shas(included), [changed[:9]])
+                self.assertEqual(self.rewritten_counts(included), {origin[:9]: (2, 0)})
+
     def test_since_is_exclusive_and_overrides_last(self):
         """最近 N 个提交包含 HEAD；since 排除起点并覆盖 last 的截断。"""
         commits = []
@@ -367,7 +386,7 @@ class ReworkTests(unittest.TestCase):
         self.git("checkout", "-q", "-")
         self.set_dates(2)
         self.write_source("other.py")
-        self.commit("feat: independent change")
+        last_non_merge = self.commit("feat: independent change")
         self.git("merge", "-q", "--no-ff", "feature", "-m", "fix: merge feature")
         merged = self.git("rev-parse", "HEAD")
 
@@ -378,6 +397,13 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(self.candidate_shas(last), [branch[:9]])
         self.assertEqual(self.rewritten_counts(result), {origin[:9]: (3, 0)})
         self.assertIn(f"reviewed-through: {merged[:9]}", result.stdout)
+        for scan in (result, last):
+            summary = re.fullmatch(
+                r"看了 (\d+) 个非合并提交（首个 ([0-9a-f]{9})，末个 ([0-9a-f]{9})），截至扫描头 ([0-9a-f]{9})",
+                scan.stdout.splitlines()[0],
+            )
+            self.assertIsNotNone(summary, scan.stdout)
+            self.assertEqual(summary.groups(), ("2", branch[:9], last_non_merge[:9], merged[:9]))
 
     def test_binary_changes_do_not_invent_line_origins(self):
         """二进制替换没有可归因的文本行，不能误报成返工候选。"""
