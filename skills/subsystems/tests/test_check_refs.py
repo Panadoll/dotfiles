@@ -528,6 +528,18 @@ class CheckRefsTests(unittest.TestCase):
             "严格模式：2 项提示按失败处理，退出 1",
         ])
 
+    def test_ignored_untracked_page_warns_until_tracked(self):
+        """被忽略且未跟踪的页会在提交时漏掉，需提示；强制加入后不再提示。"""
+        self.write_file(".gitignore", "docs/\n")
+        self.commit()
+        self.page("<!-- verified-at: 0000000 -->\n# Core\n")
+        normal = self.check()
+        self.assertIn("被 .gitignore 忽略", normal.stdout)
+        self.assertEqual(normal.stdout.count("被 .gitignore 忽略"), 2)
+        self.check(1, "--strict")
+        self.git("add", "-f", "docs/subsystems")
+        self.assertNotIn("被 .gitignore 忽略", self.check().stdout)
+
     def test_strict_summary_omitted_without_warnings(self):
         """没有提示时，无论检查通过还是失败，都不声称提示导致退出。"""
         self.write_file("docs/subsystems/README.md", "# 索引\n")

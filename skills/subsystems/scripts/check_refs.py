@@ -12,7 +12,8 @@
      带 `*` 的按名称/路径前缀匹配；段落中的含空格标记视为命令，不检查。
      验证代码块按仓库根及顺序 cd 解析字面量文件路径，支持引号与子 shell；
      不执行命令，也不展开环境变量、通配符或计算 shell 条件分支。
-  4. 索引页列出了目录下每一份参考，且没有指向不存在的页面。
+  4. 索引页列出了目录下每一份参考，且没有指向不存在的页面；
+     参考页被 .gitignore 忽略且未纳入 Git 时提示，提交时会被漏掉。
   5. `<!-- verified-at: <commit> -->` 是源码复核基线，不是行为测试证明。
      之后只改引用源码、未同时改本页的提交才提示；未提交改动同理。
      提示列出触发的提交短哈希或“未提交”；默认不算失败。
@@ -60,10 +61,10 @@ class DocReport:
     checked_tests: int = 0
 
 
-def run_git(root: Path, *args: str) -> tuple[int, str]:
+def run_git(root: Path, *args: str, stdin: str | None = None) -> tuple[int, str]:
     try:
         p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", input=stdin)
     except FileNotFoundError:
         return 127, ""
     return p.returncode, p.stdout
@@ -435,6 +436,16 @@ def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, 
     return rep
 
 
+def ignored_untracked(root: Path, paths: list[Path]) -> set[Path]:
+    rels = [p.resolve().relative_to(root).as_posix() for p in paths if p.resolve().is_relative_to(root)]
+    if not rels:
+        return set()
+    code, out = run_git(root, "check-ignore", "-z", "--stdin", stdin="\0".join(rels) + "\0")
+    if code != 0:
+        return set()
+    return {(root / name).resolve() for name in out.split("\0") if name}
+
+
 def check_index(index: Path, pages: list[Path]) -> list[str]:
     text = read_text(index) or ""
     linked = set()
@@ -477,6 +488,10 @@ def main() -> int:
     tests = TestIndex(root, repo_files(root))
     anchor_cache: dict[Path, set[str]] = {}
     reports = [check_doc(p, root, tests, anchor_cache, is_index=p == index) for p in targets]
+    ignored = ignored_untracked(root, targets)
+    for r in reports:
+        if r.path.resolve() in ignored:
+            r.warnings.append("本页被 .gitignore 忽略且未纳入 Git，提交时会漏掉：用 git add -f 加入或调整忽略规则")
 
     index_problems = []
     if not args.doc:
