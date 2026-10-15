@@ -17,8 +17,7 @@ description: "在代码库里建立和维护子系统参考文档（docs/subsyst
 | 子系统参考 `docs/subsystems/<name>.md` | 职责与边界、事实源、运行时路径、状态、约束与失败行为、验证命令 | 实现细节的复制、历史经过、未来计划 |
 | Agent Notes `docs/agent-notes/` | 为什么选这个方案、放弃了什么、什么条件下可以重新考虑 | 当前行为的描述 |
 | 测试 | 哪些状态绝不允许出现 | — |
-| `LESSONS.md` | 最近的改动错在哪、本可以拦住它的规则、证据提交 | 某个子系统的约束（写进参考页）、决策理由（写进 Agent Note） |
-| 代码规范 `docs/code-standards.md` | 复盘中出现 3 天以上的规则，评审逐条检查 | 只出现过一两次的教训 |
+| `LESSONS.md` 和代码规范 | 复盘得出的教训和评审规则，由 lessons 技能维护 | 代码当前保证的行为（写进参考页）、决策理由（写进 Agent Note） |
 | `AGENTS.md` / `CLAUDE.md` | 每次会话都要遵守的一两行规则，加链接 | 长篇说明 |
 | Git 历史 | 原始演变过程 | — |
 
@@ -94,7 +93,7 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 
 ### 定期巡检（maintain）
 
-按 [references/maintenance.md](references/maintenance.md) 执行：先整理索引，再对每页做源码比对（可以用只读子代理并行），然后统一跑验证。结论只有三种：没有问题、提交一份修正、被阻塞（说明原因）。巡检只改文档，不改产品代码。复盘（维护 `LESSONS.md`）由独立的 lessons 技能负责，可以和巡检放在同一个周期里，先巡检再复盘。
+按 [references/maintenance.md](references/maintenance.md) 执行：先整理索引，再对每页做源码比对（可以用只读子代理并行），然后统一跑验证。结论只有三种：没有问题、提交一份修正、被阻塞（说明原因）。巡检只改文档，不改产品代码。复盘（维护 `LESSONS.md`）由独立的 lessons 技能负责，它不改参考页。
 
 ## 写作要求
 
