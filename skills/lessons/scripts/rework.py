@@ -2,8 +2,10 @@
 """列出复盘范围内的返工候选（只读）。
 
 对范围内每个非合并提交，取它删除或改写的行，用 git blame 找出这些行是哪个提交写的。
-写这些行的提交离得很近（默认 72 小时内）时，记为一条候选，不据此判定返工。
-另外列出提交说明里带 revert / 回滚 的提交。重命名和移动文件跟随旧路径，不算改写。
+写这些行的提交离得很近（默认按提交者时间算 72 小时内），且本次提交累计改写达到
+--min-lines（默认 3）行时，记为一条候选，不据此判定返工；阈值跨来源提交累加。
+另外列出提交标题里带 revert / 回滚 的提交；已列为改写候选的只标注回滚，不重复列出。
+重命名和移动文件跟随旧路径，只计算真正删除或改写的行。支持 SHA-1 和 SHA-256 仓库。
 
 候选只是线索：重构、格式化、同一功能的连续开发也会命中。是否算返工，要读两边的 diff 判断。
 
@@ -72,7 +74,7 @@ def meta(root: Path, sha: str) -> tuple[int, list[str], str]:
 def touched_old_lines(root: Path, parent: str, sha: str, include_docs: bool) -> dict[str, list[tuple[int, int]]]:
     """父提交里被这次提交删除或改写的行区间，按父提交里的路径分组。"""
     out = must(root, "-c", "core.quotepath=false", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv",
-               "-M", "--src-prefix=a/", "--dst-prefix=b/", parent, sha)
+               "-M", "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/", parent, sha)
     ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
     path, in_header, gitlink = None, False, False
     for line in out.splitlines():
@@ -104,8 +106,9 @@ def blame_origins(root: Path, parent: str, path: str, spans: list[tuple[int, int
         for a, b in spans[i:i + BLAME_BATCH]:
             args += ["-L", f"{a},{b}"]
         for line in must(root, *args, parent, "--", path).splitlines():
-            if re.match(r"^[0-9a-f]{40} \d+ \d+", line):
-                counts[line[:40]] += 1
+            match = re.match(r"^([0-9a-f]{40}|[0-9a-f]{64}) \d+ \d+", line)
+            if match:
+                counts[match.group(1)] += 1
     return counts
 
 
@@ -150,8 +153,8 @@ def main() -> int:
                 age = (ts - info(origin)[0]) / 3600
                 if 0 <= age <= args.hours:
                     per_origin[origin][path] = n
-        origins = [(o, f) for o, f in per_origin.items() if sum(f.values()) >= args.min_lines]
-        if origins:
+        origins = list(per_origin.items())
+        if origins and sum(sum(files.values()) for _, files in origins) >= args.min_lines:
             origins.sort(key=lambda of: -sum(of[1].values()))
             findings.append((sha, subject, ts, origins))
 
@@ -159,6 +162,8 @@ def main() -> int:
         return sum(n for _, files in f[3] for p, n in files.items() if not TEST_PATH_RE.search(p))
 
     findings.sort(key=lambda f: (not FIX_RE.search(f[1]), product_lines(f) == 0, -product_lines(f)))
+    finding_shas = {finding[0] for finding in findings}
+    reverts = [(sha, subject) for sha, subject in reverts if sha not in finding_shas]
     span = f"（{shas[0][:9]}..{shas[-1][:9]}）" if shas else ""
     print(f"看了 {len(shas)} 个非合并提交{span}，截至 HEAD {head[:9]}")
     if reverts:
@@ -169,7 +174,8 @@ def main() -> int:
     print(f"\n返工候选（改写了 {args.hours:g} 小时内写成的至少 {args.min_lines} 行，{scope}），"
           f"共 {len(findings)} 个提交。修复类在前；仅命中近期测试行的排在同类最后，仍须读完整 diff 判断：")
     for sha, subject, ts, origins in findings:
-        print(f"  {sha[:9]} {subject}")
+        revert_label = " [回滚]" if REVERT_RE.search(subject) else ""
+        print(f"  {sha[:9]} {subject}{revert_label}")
         for origin, files in origins:
             test = sum(n for p, n in files.items() if TEST_PATH_RE.search(p))
             prod = sum(files.values()) - test
