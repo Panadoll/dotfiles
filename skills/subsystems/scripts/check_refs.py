@@ -3,12 +3,15 @@
 
 检查项：
   1. 相对链接指向的文件/目录存在；指向 .md 的 #锚点 能对上标题。
+     接受 URL 编码、尖括号包裹的空格路径和 :行号 后缀；忽略围栏代码示例。
   2. 绑定到文件的符号仍在该文件里：
        [`Sym`](path)            链接文字是符号而不是文件名
        `Sym` in [..](path)      也接受 “在” “位于”
        [..](path) -> `Sym`      也接受 → : ： 或直接跟在链接后
-  3. “验证：/Verification:” 段落里点名的测试名或测试文件在仓库里能找到。
-     带 `*` 的按前缀匹配；含空格的视为命令，不检查。
+  3. “验证：/Verification:” 段落与验证章节（含子标题）里的测试名或测试文件存在。
+     带 `*` 的按名称/路径前缀匹配；段落中的含空格标记视为命令，不检查。
+     验证代码块按仓库根及顺序 cd 解析字面量文件路径，支持引号与子 shell；
+     不执行命令，也不展开环境变量、通配符或计算 shell 条件分支。
   4. 索引页列出了目录下每一份参考，且没有指向不存在的页面。
   5. `<!-- verified-at: <commit> -->` 之后，被引用的源文件是否改过（提示过期，不算失败）。
 
@@ -22,16 +25,18 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 DEFAULT_DOC_DIRS = ["docs/subsystems", "docs/architecture/subsystems", "doc/subsystems"]
 INDEX_NAMES = ["README.md", "index.md"]
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", "target", ".venv", "venv", "__pycache__"}
 
-LINK_RE = re.compile(r"(?<!!)\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+LINK_RE = re.compile(r"(?<!!)\[((?:[^\[\]]|\[[^\]]*\])*)\]\((<[^>\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 SYM_BEFORE_RE = re.compile(r"`([A-Za-z_$][\w$.:]*)`\s*(?:\(\)\s*)?(?:in|在|位于)\s*$")
 SYM_AFTER_RE = re.compile(r"^\s*(?:->|→|:|：)?\s*`([A-Za-z_$][\w$.:]*)`")
 VERIFY_START_RE = re.compile(r"(?:(?<![\w])Verification|验证)(?:\*\*)?\s*[:：]", re.I)
@@ -40,7 +45,7 @@ TESTLIKE_RE = re.compile(r"(^Test[A-Z_]|^test_|_test\b|[._-](test|spec)\.|^tests
 VERIFIED_AT_RE = re.compile(r"<!--\s*verified-at:\s*([0-9a-fA-F]{7,40})\b")
 TOKEN_RE = re.compile(r"`([^`]+)`")
 IDENT_RE = re.compile(r"^[A-Za-z_$][\w$.:\-/]*\*?$")
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
 @dataclass
@@ -63,9 +68,9 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
 
 
 def repo_files(root: Path) -> list[Path]:
-    code, out = run_git(root, "ls-files", "-co", "--exclude-standard")
-    if code == 0 and out.strip():
-        return [root / line for line in out.splitlines() if line]
+    code, out = run_git(root, "ls-files", "-z", "-co", "--exclude-standard")
+    if code == 0:
+        return [root / name for name in out.split("\0") if name]
     files = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
@@ -82,14 +87,36 @@ def read_text(path: Path) -> str | None:
         return None
 
 
+def fence_transition(line: str, fence: str) -> tuple[str, bool]:
+    """围栏只能由相同字符、足够长度且无后缀的结束行关闭。"""
+    match = FENCE_RE.match(line)
+    if not match:
+        return fence, False
+    marker, suffix = match.groups()
+    if not fence:
+        return marker, True
+    if marker[0] == fence[0] and len(marker) >= len(fence) and not suffix.strip():
+        return "", True
+    return fence, False
+
+
+def local_link(target: str) -> tuple[str, str] | None:
+    """统一正文和索引的本地链接、行号与 URL 编码处理。"""
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1]
+    path, _, anchor = target.partition("#")
+    path = re.sub(r":\d+(-\d+)?$", "", path)
+    if re.match(r"^[a-z][a-z0-9+.-]*:", path, re.I):
+        return None
+    return unquote(path), unquote(anchor)
+
+
 def strip_code_blocks(text: str) -> list[tuple[int, str]]:
     """返回 (行号, 行内容)，去掉围栏代码块，避免把示例当成真实引用。"""
-    lines, in_fence = [], False
+    lines, fence = [], ""
     for no, line in enumerate(text.splitlines(), 1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if not in_fence:
+        fence, boundary = fence_transition(line, fence)
+        if not boundary and not fence:
             lines.append((no, line))
     return lines
 
@@ -112,7 +139,11 @@ def md_anchors(path: Path, cache: dict[Path, set[str]]) -> set[str]:
             if m:
                 slug = slugify(m.group(1))
                 n = seen.get(slug, 0)
-                anchors.add(slug if n == 0 else f"{slug}-{n}")
+                anchor = slug if n == 0 else f"{slug}-{n}"
+                while anchor in anchors:
+                    n += 1
+                    anchor = f"{slug}-{n}"
+                anchors.add(anchor)
                 seen[slug] = n + 1
             for a in re.findall(r"<a\s+(?:name|id)=\"([^\"]+)\"", line):
                 anchors.add(a)
@@ -142,11 +173,15 @@ def symbol_in_file(sym: str, target: Path) -> bool:
 
 def verification_tokens(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     """收集“验证：”之后到段落结束的反引号标识符；“## 验证”章节里只收像测试的名字。"""
-    tokens, active, in_section = [], False, False
+    tokens, active, section_level = [], False, 0
     for no, line in lines:
         heading = re.match(r"^(#{1,6})\s+(.*)", line)
         if heading:
-            in_section = bool(VERIFY_HEADING_RE.match(heading.group(2)))
+            level = len(heading.group(1))
+            if level <= section_level:
+                section_level = 0
+            if not section_level and VERIFY_HEADING_RE.match(heading.group(2)):
+                section_level = level
             active = False
             continue
         start = VERIFY_START_RE.search(line)
@@ -155,7 +190,7 @@ def verification_tokens(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
         if start:
             active = True
             line = line[start.end():]
-        if not (active or in_section):
+        if not (active or section_level):
             continue
         for tok in TOKEN_RE.findall(line):
             tok = tok.strip()
@@ -166,55 +201,91 @@ def verification_tokens(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return tokens
 
 
-CMD_PATH_RE = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|rb|php|cs|swift|sh))(?![\w/])")
-CD_RE = re.compile(r"\bcd\s+([^\s;&|]+)")
+CMD_PATH_RE = re.compile(r".+\.(?:py|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|rb|php|cs|swift|sh)$")
+EMBEDDED_PATH_RE = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|rb|php|cs|swift|sh))(?![\w/])")
 
 
-def verification_command_paths(text: str) -> list[tuple[int, str, list[str]]]:
-    """“## 验证”章节里代码块引用的源文件路径，连同块内 cd 过的目录。"""
-    out, in_section, in_fence, cds = [], False, False, []
+def verification_command_paths(text: str) -> list[tuple[int, str, Path]]:
+    """按验证章节中每个代码块的顺序解析字面量路径及相对 cd。"""
+    out, section_level, fence = [], 0, ""
+    cwd = Path(".")
+    cwd_stack = []
     for no, line in enumerate(text.splitlines(), 1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            cds = []
+        fence, boundary = fence_transition(line, fence)
+        if boundary:
+            cwd = Path(".")
+            cwd_stack = []
             continue
-        if not in_fence:
-            heading = re.match(r"^#{1,6}\s+(.*)", line)
+        if not fence:
+            heading = re.match(r"^(#{1,6})\s+(.*)", line)
             if heading:
-                in_section = bool(VERIFY_HEADING_RE.match(heading.group(1)))
+                level = len(heading.group(1))
+                if level <= section_level:
+                    section_level = 0
+                if not section_level and VERIFY_HEADING_RE.match(heading.group(2)):
+                    section_level = level
             continue
-        if not in_section:
+        if not section_level:
             continue
-        cds += [c for c in CD_RE.findall(line) if not c.startswith(("/", "~", "$"))]
-        for p in CMD_PATH_RE.findall(line):
-            out.append((no, p, list(cds)))
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        try:
+            words = list(lexer)
+        except ValueError:
+            # 不完整的 shell 引号保留原有逐词扫描，不执行文档中的命令。
+            words = line.split()
+        command = []
+        for word in words + [";"]:
+            if word and all(c in ";&|()" for c in word):
+                if command and command[0] == "cd" and len(command) > 1:
+                    directory = command[1]
+                    if not directory.startswith(("~", "$")) and directory != "-":
+                        cwd = cwd / directory
+                else:
+                    for token in command:
+                        path = token.split("=", 1)[-1].split("::", 1)[0]
+                        if CMD_PATH_RE.fullmatch(path) and not any(q in path for q in "\"'"):
+                            out.append((no, path, cwd))
+                        else:
+                            out.extend((no, p, cwd) for p in EMBEDDED_PATH_RE.findall(token))
+                command = []
+                for delimiter in word:
+                    if delimiter == "(":
+                        cwd_stack.append(cwd)
+                    elif delimiter == ")" and cwd_stack:
+                        cwd = cwd_stack.pop()
+            else:
+                command.append(word)
     return out
 
 
 class TestIndex:
     def __init__(self, root: Path, files: list[Path]):
         self.root = root
-        self.files = files
-        self.names = {f.name for f in files}
-        self.rel = {f.relative_to(root).as_posix() for f in files if f.is_relative_to(root)}
+        self.files = [f for f in files if f.is_file()]
+        self.names = {f.name for f in self.files}
+        self.rel = {f.relative_to(root).as_posix() for f in self.files if f.is_relative_to(root)}
         self._found: dict[str, bool] = {}
 
     def resolve(self, tokens: set[str]) -> None:
         pending = [t for t in tokens if t not in self._found]
         for t in pending:
             bare = t.rstrip("*")
-            if t in self.names or t in self.rel or any(n.startswith(bare) for n in self.names if t.endswith("*") and looks_like_path(bare)):
+            if t in self.names or t in self.rel:
                 self._found[t] = True
+            elif t.endswith("*") and any(name.startswith(bare) for name in self.names | self.rel):
+                self._found[t] = True
+            elif "/" in bare or "\\" in bare or CMD_PATH_RE.fullmatch(bare):
+                self._found[t] = False
         pending = [t for t in pending if t not in self._found]
         if not pending:
             return
         exact = [t for t in pending if not t.endswith("*")]
         prefix = [t.rstrip("*") for t in pending if t.endswith("*")]
-        hits = self._git_grep(exact, whole_word=True) | self._git_grep(prefix, whole_word=False)
-        if hits is None:
-            hits = set()
+        exact_hits = self._git_grep(exact, whole_word=True)
+        prefix_hits = self._git_grep(prefix, whole_word=False)
         for t in pending:
-            self._found[t] = t.rstrip("*") in hits
+            self._found[t] = t[:-1] in prefix_hits if t.endswith("*") else t in exact_hits
 
     def _git_grep(self, needles: list[str], whole_word: bool) -> set[str]:
         if not needles:
@@ -222,27 +293,28 @@ class TestIndex:
         found: set[str] = set()
         for i in range(0, len(needles), 200):
             chunk = needles[i:i + 200]
-            args = ["grep", "-h", "-o", "-F", "-I", "--untracked"]
-            if whole_word:
-                args.append("-w")
+            args = ["grep", "-h", "-o", "-I", "--untracked", "-w", "-F" if whole_word else "-E"]
             for n in chunk:
-                args += ["-e", n]
+                pattern = n if whole_word else re.escape(n) + "[[:alnum:]_]*"
+                args += ["-e", pattern]
             args += ["--", ".", ":(exclude)*.md"]
             code, out = run_git(self.root, *args)
             if code in (0, 1):
                 found.update(line.strip() for line in out.splitlines())
             else:
-                found.update(self._walk_grep(chunk))
-        return {n for n in needles if n in found or any(f.startswith(n) for f in found)}
+                found.update(self._walk_grep(chunk, whole_word))
+        return {n for n in needles if n in found or (not whole_word and any(f.startswith(n) for f in found))}
 
-    def _walk_grep(self, needles: list[str]) -> set[str]:
+    def _walk_grep(self, needles: list[str], whole_word: bool) -> set[str]:
         found = set()
+        patterns = [(n, re.compile(r"(?<!\w)" + re.escape(n) + (r"(?!\w)" if whole_word else "")))
+                    for n in needles]
         for f in self.files:
             if f.suffix == ".md":
                 continue
             text = read_text(f)
             if text:
-                found.update(n for n in needles if n in text)
+                found.update(n for n, pattern in patterns if pattern.search(text))
         return found
 
     def found(self, token: str) -> bool:
@@ -259,14 +331,14 @@ def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, 
     for no, line in lines:
         for m in LINK_RE.finditer(line):
             label, target = m.group(1), m.group(2)
-            if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I) or target.startswith("#") and not target[1:]:
+            local = local_link(target)
+            if local is None:
                 continue
-            path_part, _, anchor = target.partition("#")
+            path_part, anchor = local
             if not path_part:
                 if anchor and anchor not in md_anchors(doc, anchor_cache):
                     rep.failures.append(f"L{no}: 本页锚点不存在 #{anchor}")
                 continue
-            path_part = re.sub(r":\d+(-\d+)?$", "", path_part)
             resolved = (doc.parent / path_part).resolve()
             rep.checked_links += 1
             if not resolved.exists():
@@ -300,10 +372,9 @@ def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, 
         if not tests.found(tok):
             rep.failures.append(f"L{no}: 验证项 `{tok}` 在仓库里找不到")
 
-    for no, p, cds in verification_command_paths(text):
+    for no, p, cwd in verification_command_paths(text):
         rep.checked_tests += 1
-        bases = [root] + [root / c for c in cds]
-        if not any((b / p).exists() for b in bases) and not any(r.endswith("/" + p) or r == p for r in tests.rel):
+        if not (root / cwd / p).is_file():
             rep.failures.append(f"L{no}: 验证命令引用的 {p} 不存在")
         if re.search(r"(^|\s)/(?:tmp|home|Users|mnt)/|[A-Za-z]:\\", text.splitlines()[no - 1]):
             rep.warnings.append(f"L{no}: 验证命令含绝对路径，换台机器跑不了")
@@ -331,9 +402,9 @@ def check_index(index: Path, pages: list[Path]) -> list[str]:
     linked = set()
     for _, line in strip_code_blocks(text):
         for m in LINK_RE.finditer(line):
-            target = m.group(2).partition("#")[0]
-            if target and not re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
-                linked.add((index.parent / target).resolve())
+            local = local_link(m.group(2))
+            if local is not None and local[0]:
+                linked.add((index.parent / local[0]).resolve())
     return [f"索引没有列出 {p.name}" for p in pages if p.resolve() not in linked]
 
 
