@@ -77,6 +77,82 @@ class ReworkTests(unittest.TestCase):
             self.assertIn(f"{sha[:9]} fix: settings {i}", complete.stdout)
         self.assertIn(f"reviewed-through: {commits[-1][:9]}", complete.stdout)
 
+    def test_removed_line_starting_with_double_dash_keeps_later_hunks(self):
+        source = self.root / "init.lua"
+        source.write_text("-- header\nk = 0\nk = 0\nk = 0\nx = 1\ny = 2\nz = 3\n", encoding="utf-8")
+        origin = self.commit("feat: init")
+        source.write_text("k = 0\nk = 0\nk = 0\nx = 10\ny = 20\nz = 30\n", encoding="utf-8")
+        self.commit("fix: init")
+
+        result = self.run_script("rework.py", "--last", "2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"改写 {origin[:9]} 的产品代码 4 行", result.stdout)
+
+    def test_counts_every_hunk_of_a_large_rewrite(self):
+        source = self.root / "values.py"
+        source.write_text("".join(f"v{i} = 0\npad{i} = 1\n" for i in range(100)), encoding="utf-8")
+        origin = self.commit("feat: values")
+        source.write_text("".join(f"v{i} = 9\npad{i} = 1\n" for i in range(100)), encoding="utf-8")
+        self.commit("fix: values")
+
+        result = self.run_script("rework.py", "--last", "2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"改写 {origin[:9]} 的产品代码 100 行", result.stdout)
+
+    def test_moved_file_is_not_rework(self):
+        (self.root / "old").mkdir()
+        (self.root / "old" / "tool.py").write_text("".join(f"a{i} = {i}\n" for i in range(20)), encoding="utf-8")
+        self.commit("feat: tool")
+        self.git("mv", "old", "new")
+        moved = self.commit("refactor: move tool")
+
+        result = self.run_script("rework.py", "--last", "2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(f"{moved[:9]} refactor", result.stdout)
+
+    def test_marker_is_head_so_merged_branch_is_not_rescanned(self):
+        (self.root / "a.py").write_text("a = 1\n", encoding="utf-8")
+        base = self.commit("feat: a")
+        self.git("checkout", "-qb", "feat")
+        (self.root / "b.py").write_text("b = 1\n", encoding="utf-8")
+        branch = self.commit("feat: b")
+        self.git("checkout", "-q", "-")
+        (self.root / "c.py").write_text("c = 1\n", encoding="utf-8")
+        self.commit("feat: c")
+        self.git("merge", "-q", "--no-ff", "feat", "-m", "merge feat")
+        head = self.git("rev-parse", "HEAD")
+
+        first = self.run_script("rework.py", "--since", base)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(f"reviewed-through: {head[:9]}", first.stdout)
+
+        second = self.run_script("rework.py", "--since", head[:9])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("看了 0 个非合并提交", second.stdout)
+        self.assertNotIn(branch[:9], second.stdout)
+
+    def test_refuses_shallow_clone(self):
+        source = self.root / "settings.py"
+        for i in range(2):
+            source.write_text(f"mode = {i}\n", encoding="utf-8")
+            self.commit(f"feat: settings {i}")
+        clone_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(clone_dir.cleanup)
+        shallow = Path(clone_dir.name) / "clone"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", self.root.as_uri(), str(shallow)],
+                       env=self.env, capture_output=True, check=True)
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "rework.py"), "--root", str(shallow)],
+            env=self.env, text=True, encoding="utf-8", capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotIn("reviewed-through:", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
