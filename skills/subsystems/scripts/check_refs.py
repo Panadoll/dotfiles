@@ -311,7 +311,7 @@ def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, 
     m = VERIFIED_AT_RE.search(text)
     if not m and not is_index:
         rep.warnings.append("没有 <!-- verified-at: <commit> --> 标记，无法判断是否过期")
-    elif linked_files:
+    elif m and linked_files:
         sha = m.group(1)
         code, _ = run_git(root, "cat-file", "-e", f"{sha}^{{commit}}")
         if code != 0:

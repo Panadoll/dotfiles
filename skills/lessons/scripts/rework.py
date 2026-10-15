@@ -2,7 +2,7 @@
 """列出复盘范围内的返工候选（只读）。
 
 对范围内每个非合并提交，取它删除或改写的行，用 git blame 找出这些行是哪个提交写的。
-写这些行的提交离得很近（默认 72 小时内）时，记为一条候选：后一个提交在返工前一个。
+写这些行的提交离得很近（默认 72 小时内）时，记为一条候选，不据此判定返工。
 另外列出提交说明里带 revert / 回滚 的提交。
 
 候选只是线索：重构、格式化、同一功能的连续开发也会命中。是否算返工，要读两边的 diff 判断。
@@ -12,11 +12,13 @@
                    [--include-docs] [--max-commits 400]
 
   --since 一般填 LESSONS.md 第一行 reviewed-through 的提交；不填时看最近 --last 个提交（默认 50）。
-退出码：0 正常（有没有候选都是 0）；2 用法错误。
+  范围超过 --max-commits 时退出，不扫描、不输出 reviewed-through；调大上限后重跑。
+退出码：0 正常（有没有候选都是 0）；2 用法错误或范围超限。
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import subprocess
 import sys
@@ -46,8 +48,8 @@ def commits_in_range(root: Path, since: str | None, last: int, cap: int) -> list
         raise SystemExit(2)
     shas = out.split()
     if len(shas) > cap:
-        print(f"范围内有 {len(shas)} 个提交，只看最后 {cap} 个（用 --max-commits 调整）", file=sys.stderr)
-        shas = shas[-cap:]
+        print(f"范围内有 {len(shas)} 个提交，超过上限 {cap}；未扫描，请用 --max-commits 调大上限后重跑", file=sys.stderr)
+        raise SystemExit(2)
     return shas
 
 
@@ -59,12 +61,15 @@ def meta(root: Path, sha: str) -> tuple[int, str]:
 
 def touched_old_lines(root: Path, sha: str, include_docs: bool) -> dict[str, list[tuple[int, int]]]:
     """父提交里被这次提交删除或改写的行区间，按文件分组。"""
-    _, out = git(root, "diff", "-U0", "--no-color", "--no-renames", f"{sha}^", sha)
+    _, out = git(root, "-c", "core.quotepath=false", "diff", "-U0", "--no-color", "--no-renames", f"{sha}^", sha)
     ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
     path = None
     for line in out.splitlines():
         if line.startswith("--- "):
-            path = line[6:] if line.startswith("--- a/") else None
+            old_path = line[4:].rstrip("\t")
+            if old_path.startswith('"'):
+                old_path = ast.literal_eval(old_path)
+            path = old_path[2:] if old_path.startswith("a/") else None
         elif path and not SKIP_PATH_RE.search(path) and (include_docs or not DOC_PATH_RE.search(path)):
             m = HUNK_RE.match(line)
             if m:
@@ -142,7 +147,7 @@ def main() -> int:
             print(f"  {sha[:9]} {subject}")
     scope = "含文档" if args.include_docs else "不含文档"
     print(f"\n返工候选（改写了 {args.hours:g} 小时内写成的至少 {args.min_lines} 行，{scope}），"
-          f"共 {len(findings)} 个提交。修复类在前；只改写了测试行的排在同类最后，多半不是产品返工：")
+          f"共 {len(findings)} 个提交。修复类在前；仅命中近期测试行的排在同类最后，仍须读完整 diff 判断：")
     for sha, subject, ts, origins in findings:
         print(f"  {sha[:9]} {subject}")
         for origin, files in origins:

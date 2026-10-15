@@ -1,6 +1,6 @@
 ---
 name: subsystems
-description: "在代码库里建立和维护子系统参考文档（docs/subsystems/*.md）：每页说明一项能力的职责、事实源、运行时路径、状态、约束和验证命令，链接到源码符号，与代码同 PR 更新；配套 Agent Notes 记录设计取舍，用脚本检查文档引用是否过期；定期复盘已合并的提交，把返工教训写进 LESSONS.md，反复出现的升级为代码规范。用于：为仓库建立子系统文档、改代码前了解某个子系统、提交前检查文档是否同步、记录架构决策、定期巡检文档漂移、复盘最近的提交。"
+description: "在代码库里建立和维护子系统参考文档（docs/subsystems/*.md）：每页说明一项能力的职责、事实源、运行时路径、状态、约束和验证命令，链接到源码符号，与代码同 PR 更新；配套 Agent Notes 记录设计取舍，用脚本检查文档引用是否过期。用于：为仓库建立子系统文档、改代码前了解某个子系统、提交前检查文档是否同步、记录架构决策、定期巡检文档漂移。"
 ---
 
 # 子系统参考文档
@@ -26,13 +26,13 @@ description: "在代码库里建立和维护子系统参考文档（docs/subsyst
 
 ## 检查脚本
 
-`scripts/check_refs.py`（相对本技能目录，只依赖 Python 3 标准库和 git；下面的 `python` 在 Linux/macOS 上通常是 `python3`）只读地检查：
+`scripts/check_refs.py`（相对本技能目录，只依赖 Python 3.9+ 标准库和 git；下面的 `python` 在 Linux/macOS 上通常是 `python3`）只读地检查：
 
 - 相对链接的目标和锚点是否存在；
 - 绑定到文件的符号是否还在那个文件里，写法是 ``[`Sym`](path)``、`` `Sym` in [..](path) `` 或 ``[..](path) `Sym` ``；
 - `验证：` 段落和 `## 验证` 章节里点名的测试，以及验证代码块里引用的测试文件，是否还能在仓库里找到；
 - 索引是否列全了每一页；
-- 页面里 `<!-- verified-at: <commit> -->` 之后，被引用的源文件是否改过。
+- 页面里 `<!-- verified-at: <commit> -->` 之后，被引用的源文件是否改过（索引页可不写这个标记）。
 
 ```bash
 python <技能目录>/scripts/check_refs.py --root <仓库根>              # 全部
@@ -40,8 +40,6 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 ```
 
 失败项返回码为 1。“改过的源文件”只是提示：说明需要人工复核，不代表文档错了。
-
-`scripts/rework.py` 供复盘使用，同样只读：对范围内每个提交用 `git blame` 追溯它改写的行，列出改写了几天内刚写成代码的提交和回滚提交，作为返工候选。
 
 ## 工作流
 
@@ -96,17 +94,7 @@ python <技能目录>/scripts/check_refs.py --root <仓库根> --doc <name>  # �
 
 ### 定期巡检（maintain）
 
-按 [references/maintenance.md](references/maintenance.md) 执行：先整理索引，再对每页做源码比对（可以用只读子代理并行），然后统一跑验证。结论只有三种：没有问题、提交一份修正、被阻塞（说明原因）。巡检只改文档，不改产品代码。
-
-### 复盘（retro）
-
-巡检查的是文档有没有跟上代码，复盘查的是代码改动本身哪里做错了。按 [references/lessons.md](references/lessons.md) 执行：
-
-1. 从 `LESSONS.md` 第一行的 `reviewed-through` 开始，用 `rework.py` 找返工候选，再补上回滚、重开的 issue、红着测试合并的提交。
-2. 读两边的 diff，判断哪些是本该一次做对的返工，正常的分步开发不算。
-3. 把证据归纳成具体可检查的规则，写进 `LESSONS.md`，每条附提交哈希，按不同的日子计“出现”次数。只关乎一个子系统的规则写进该参考页的约束。
-4. 出现 3 天的教训移进代码规范，评审从此逐条检查。
-5. 推进 `reviewed-through`，只提交 `LESSONS.md`、代码规范和参考页，不改产品代码。
+按 [references/maintenance.md](references/maintenance.md) 执行：先整理索引，再对每页做源码比对（可以用只读子代理并行），然后统一跑验证。结论只有三种：没有问题、提交一份修正、被阻塞（说明原因）。巡检只改文档，不改产品代码。复盘（维护 `LESSONS.md`）由独立的 lessons 技能负责，可以和巡检放在同一个周期里，先巡检再复盘。
 
 ## 写作要求
 
