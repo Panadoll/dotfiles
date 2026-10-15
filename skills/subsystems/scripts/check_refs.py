@@ -13,12 +13,14 @@
      验证代码块按仓库根及顺序 cd 解析字面量文件路径，支持引号与子 shell；
      不执行命令，也不展开环境变量、通配符或计算 shell 条件分支。
   4. 索引页列出了目录下每一份参考，且没有指向不存在的页面。
-  5. `<!-- verified-at: <commit> -->` 之后，被引用的源文件是否改过（提示过期，不算失败）。
+  5. `<!-- verified-at: <commit> -->` 是源码复核基线，不是行为测试证明。
+     之后只改引用源码、未同时改本页的提交才提示；未提交改动同理。
+     提示列出触发的提交短哈希或“未提交”；默认不算失败。
 
 用法：
   python check_refs.py [--root 仓库根] [--docs docs/subsystems] [--doc 名称 ...] [--strict]
 
-退出码：0 没有失败项；1 有失败项（--strict 时过期提示也算失败）；2 用法错误。
+退出码：0 没有失败项；1 有失败项（--strict 时所有提示也算失败）；2 用法错误。
 """
 from __future__ import annotations
 
@@ -321,6 +323,43 @@ class TestIndex:
         return self._found.get(token, False)
 
 
+def unreviewed_source_changes(root: Path, doc: Path, sha: str,
+                             linked_files: set[Path]) -> list[str]:
+    """批量找出改了引用源码、却没有同时改本页的提交和工作区变化。"""
+    sources = {p.relative_to(root).as_posix() for p in linked_files}
+    doc_path = doc.resolve()
+    doc_rel = doc_path.relative_to(root).as_posix() if doc_path.is_relative_to(root) else None
+    paths = sources | ({doc_rel} if doc_rel is not None else set())
+    pathspecs = [f":(literal){path}" for path in sorted(paths)]
+    code, out = run_git(root, "log", f"{sha}..HEAD", "--format=%x00%H", "--name-only",
+                        "-z", "--no-renames", "-m", "--full-history", "--", *pathspecs)
+    changes: dict[str, set[str]] = {}
+    if code == 0:
+        # 双 NUL 分隔提交，路径仍用 NUL 分隔，保留中文、空格和换行。
+        # 合并提交可能按父提交分段，先合并文件集合再判断本页是否同行。
+        for record in out.lstrip("\0").split("\0\0"):
+            commit, _, names = record.partition("\0")
+            if commit:
+                changes.setdefault(commit, set()).update(
+                    name for name in names.removeprefix("\n").split("\0") if name
+                )
+
+    # status 同时覆盖暂存、未暂存和新建文件；禁用可选锁以免刷新 Git 索引。
+    code, out = run_git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
+                        "--untracked-files=all", "--no-renames", "--", *pathspecs)
+    if code == 0:
+        changes["未提交"] = {entry[3:] for entry in out.split("\0") if entry}
+
+    details = []
+    for commit, paths in changes.items():
+        if doc_rel in paths:
+            continue
+        changed = sources & paths
+        if changed:
+            details.append(f"{commit[:9]}：{', '.join(sorted(changed))}")
+    return details
+
+
 def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, set[str]],
               is_index: bool = False) -> DocReport:
     rep = DocReport(doc)
@@ -388,11 +427,10 @@ def check_doc(doc: Path, root: Path, tests: TestIndex, anchor_cache: dict[Path, 
         if code != 0:
             rep.warnings.append(f"verified-at {sha} 不是本仓库的提交")
         else:
-            rels = [str(p.relative_to(root.resolve())) for p in sorted(linked_files)]
-            code, out = run_git(root, "diff", "--name-only", sha, "--", *rels)
-            changed = [l for l in out.splitlines() if l]
+            changed = unreviewed_source_changes(root, doc, sha, linked_files)
             if changed:
-                rep.warnings.append(f"verified-at {sha[:9]} 之后改过的源文件：" + ", ".join(changed))
+                rep.warnings.append(f"verified-at {sha[:9]} 之后改过的源文件（未随本页复核）："
+                                    + "; ".join(changed))
     rep.warnings = list(dict.fromkeys(rep.warnings))
     return rep
 

@@ -358,15 +358,140 @@ class CheckRefsTests(unittest.TestCase):
         self.check(0, "--strict")
 
     def test_source_drift_warns_and_strict_fails(self):
-        """已提交和未提交的被引用源文件变化都提示，strict 才失败。"""
+        """只有源码未提交或单独提交时提示，并标明变化来源。"""
         self.write_file("core.py", "value = 1\n")
         sha = self.commit()
         self.page(f"<!-- verified-at: {sha[:9]} -->\n[源码](../../core.py)\n")
+        self.commit("fixture: reference baseline")
         self.write_file("core.py", "value = 2\n")
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                if staged:
+                    self.git("add", "core.py")
+                normal = self.check()
+                self.assertIn("core.py", normal.stdout)
+                self.assertIn("未提交", normal.stdout)
+                self.check(1, "--strict")
+        changed = self.commit("fixture: changed source")
         normal = self.check()
-        self.assertIn("改过的源文件：core.py", normal.stdout)
+        self.assertIn(changed[:7], normal.stdout)
         self.check(1, "--strict")
-        self.commit("fixture: changed source")
+
+    def test_code_and_reference_in_same_commit_pass_strict(self):
+        """复现提交前 audit：标记指向旧 HEAD，代码与本页一起提交。"""
+        self.write_file("core.py", "def start(): return 1\n")
+        source_sha = self.commit()
+        self.page(f"<!-- verified-at: {source_sha} -->\n[`start`](../../core.py)\n")
+        baseline = self.commit("fixture: initialize reference")
+        self.write_file("core.py", "def renamed(): return 1\n")
+        self.page(f"<!-- verified-at: {baseline} -->\n[`renamed`](../../core.py)\n")
+        self.commit("fixture: rename source with reference")
+        self.check(0, "--strict")
+
+    def test_later_source_only_commit_still_warns(self):
+        """同提交复核只覆盖该提交，之后单改源码仍需报告其哈希。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        self.commit("fixture: reference baseline")
+        self.write_file("core.py", "value = 2\n")
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n值为 2。\n")
+        reviewed = self.commit("fixture: reviewed source change")
+        self.write_file("core.py", "value = 3\n")
+        changed = self.commit("fixture: source without review")
+        normal = self.check()
+        self.assertIn("core.py", normal.stdout)
+        self.assertIn(changed[:7], normal.stdout)
+        self.assertNotIn(reviewed[:7], normal.stdout)
+        self.check(1, "--strict")
+
+    def test_worktree_source_and_reference_changes_pass_strict(self):
+        """暂存与未暂存可混合；只刷新标记也算本页随源码复核。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        baseline = self.commit("fixture: reference baseline")
+        for value, (stage_source, stage_doc) in enumerate(
+                ((False, False), (True, False), (False, True), (True, True)), 2):
+            with self.subTest(stage_source=stage_source, stage_doc=stage_doc):
+                self.write_file("core.py", f"value = {value}\n")
+                self.page(f"<!-- verified-at: {baseline} -->\n[源码](../../core.py)\n")
+                if stage_source:
+                    self.git("add", "core.py")
+                if stage_doc:
+                    self.git("add", "docs/subsystems/core.md")
+                self.check(0, "--strict")
+                baseline = self.commit("fixture: reviewed worktree changes")
+
+    def test_new_reference_covers_uncommitted_source_change(self):
+        """init 新建的未跟踪参考页同样覆盖未提交源码变化。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.write_file("core.py", "value = 2\n")
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        self.check(0, "--strict")
+
+    def test_worktree_review_does_not_hide_earlier_source_only_commit(self):
+        """本页的工作区修改不能追认基线之后已独立提交的源码。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        self.commit("fixture: reference baseline")
+        self.write_file("core.py", "value = 2\n")
+        changed = self.commit("fixture: source without review")
+        self.write_file("core.py", "value = 3\n")
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n值为 3。\n")
+        normal = self.check()
+        self.assertIn(changed[:7], normal.stdout)
+        self.assertNotIn("未提交", normal.stdout)
+        self.check(1, "--strict")
+
+    def test_other_reference_change_does_not_count_as_review(self):
+        """同一提交改的是其他页时，不能替本页免除源码复核。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        self.commit("fixture: reference baseline")
+        self.write_file("core.py", "value = 2\n")
+        self.write_file("docs/subsystems/other.md", f"<!-- verified-at: {sha} -->\n其他页。\n")
+        changed = self.commit("fixture: source with unrelated reference")
+        normal = self.check(0, "--doc", "core")
+        self.assertIn(changed[:7], normal.stdout)
+        self.check(1, "--strict", "--doc", "core")
+
+    def test_reverted_source_changes_still_need_review(self):
+        """逐提交检查不能被最终源码恰好回到基线内容掩盖。"""
+        self.write_file("core.py", "value = 1\n")
+        sha = self.commit()
+        self.page(f"<!-- verified-at: {sha} -->\n[源码](../../core.py)\n")
+        self.commit("fixture: reference baseline")
+        self.write_file("core.py", "value = 2\n")
+        changed = self.commit("fixture: source without review")
+        self.write_file("core.py", "value = 1\n")
+        reverted = self.commit("fixture: revert source without review")
+        normal = self.check()
+        self.assertIn(changed[:7], normal.stdout)
+        self.assertIn(reverted[:7], normal.stdout)
+        self.check(1, "--strict")
+
+    def test_freshness_handles_multiple_unicode_source_paths(self):
+        """批量检查保留中文空格路径，并只报告没有随本页复核的文件。"""
+        self.write_file("状态 设置.py", "value = 1\n")
+        self.write_file("other.py", "value = 1\n")
+        sha = self.commit()
+        text = f"<!-- verified-at: {sha} -->\n[源码](<../../状态 设置.py>)\n[其他](../../other.py)\n"
+        self.page(text)
+        self.commit("fixture: reference baseline")
+        self.write_file("other.py", "value = 2\n")
+        self.page(text + "其他值为 2。\n")
+        reviewed = self.commit("fixture: reviewed other source")
+        self.write_file("状态 设置.py", "value = 2\n")
+        changed = self.commit("fixture: source without review")
+        normal = self.check()
+        self.assertIn("状态 设置.py", normal.stdout)
+        self.assertIn(changed[:7], normal.stdout)
+        self.assertNotIn("other.py", normal.stdout)
+        self.assertNotIn(reviewed[:7], normal.stdout)
         self.check(1, "--strict")
 
     def test_unknown_verification_commit_warns(self):
