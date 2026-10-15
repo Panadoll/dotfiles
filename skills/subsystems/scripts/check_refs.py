@@ -495,6 +495,8 @@ def main() -> int:
     for p in index_problems:
         print(f"[失败] 索引：{p}")
     print(f"\n共 {len(reports)} 页，失败 {fail_count} 项，提示 {warn_count} 项")
+    if args.strict and warn_count:
+        print(f"严格模式：{warn_count} 项提示按失败处理，退出 1")
     return 1 if fail_count or (args.strict and warn_count) else 0
 
 

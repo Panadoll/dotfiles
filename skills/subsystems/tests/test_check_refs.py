@@ -510,6 +510,33 @@ class CheckRefsTests(unittest.TestCase):
         self.check(1, "--strict")
         self.check(0, "--strict", "--doc", "README")
 
+    def test_strict_summary_explains_warning_exit(self):
+        """严格模式在汇总后解释提示导致的非零退出，数量随提示变化。"""
+        self.page("# Core\n")
+        normal = self.check()
+        self.assertNotIn("严格模式：", normal.stdout)
+        strict = self.check(1, "--strict")
+        self.assertEqual(strict.stdout.splitlines()[-2:], [
+            "共 2 页，失败 0 项，提示 1 项",
+            "严格模式：1 项提示按失败处理，退出 1",
+        ])
+        self.write_file("docs/subsystems/other.md", "[缺失](../../missing.py)\n")
+        self.write_file("docs/subsystems/README.md", "[Core](core.md)\n[Other](other.md)\n")
+        strict = self.check(1, "--strict")
+        self.assertEqual(strict.stdout.splitlines()[-2:], [
+            "共 3 页，失败 1 项，提示 2 项",
+            "严格模式：2 项提示按失败处理，退出 1",
+        ])
+
+    def test_strict_summary_omitted_without_warnings(self):
+        """没有提示时，无论检查通过还是失败，都不声称提示导致退出。"""
+        self.write_file("docs/subsystems/README.md", "# 索引\n")
+        passed = self.check(0, "--strict")
+        self.assertNotIn("严格模式：", passed.stdout)
+        self.write_file("docs/subsystems/README.md", "[缺失](../../missing.py)\n")
+        failed = self.check(1, "--strict")
+        self.assertNotIn("严格模式：", failed.stdout)
+
     def test_exact_name_does_not_reuse_prefix_hit(self):
         """星号查询的命中不能使同批精确查询也通过。"""
         self.write_file("tests/test_core.py", "def test_start_more(): pass\n")
